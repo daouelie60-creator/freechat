@@ -1249,10 +1249,10 @@
           <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
         </svg>
       </button>
-      <div class="room-icon">💬</div>
+      <div class="room-icon" id="header-avatar" style="display:none">💬</div>
       <div class="info">
-        <h3 id="header-room"></h3>
-        <p id="header-count">0 online</p>
+        <h3 id="header-room">FreeChat</h3>
+        <p id="header-count">Select a contact to chat</p>
       </div>
       <div class="header-actions">
         <button class="hdr-btn" id="mute-btn" onclick="toggleMute()" title="Sound & notifications" aria-label="Toggle sound and notifications">
@@ -1287,6 +1287,11 @@
     </div>
 
     <div id="messages"></div>
+    <div id="no-chat-placeholder" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:30px;color:var(--muted);gap:14px">
+      <div style="width:90px;height:90px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:2.6rem">💬</div>
+      <div style="font-size:1.15rem;color:var(--text);font-weight:500">Your private chats</div>
+      <div style="font-size:0.88rem;max-width:300px;line-height:1.5">Tap a contact on the left to start a private conversation. Only the two of you will see those messages.</div>
+    </div>
     <div id="typing-indicator"></div>
 
     <div id="input-area">
@@ -1489,6 +1494,12 @@
   let typingTimeout;
   let pendingImages = [];
 
+  // Private-chat state
+  let activeChat = null;       // username we're currently chatting with
+  let contacts = [];           // all contacts: {username, avatar, online, lastSeen}
+  let unread = {};             // username -> unread count
+  const avatarBook = {};       // username -> avatar (remembered)
+
   // Notification + sound state
   let soundEnabled = true;
   let notifyCtx = null;     // Web Audio context for the "ding"
@@ -1545,49 +1556,42 @@
 
     socket.on('connect', () => socket.emit('join', { username, room }));
 
-    socket.on('history', (messages) => {
+    // History for the conversation we just opened
+    socket.on('dm-history', ({ withUser, messages }) => {
+      if (withUser !== activeChat) return; // ignore if user switched away
+      const container = document.getElementById('messages');
+      container.innerHTML = '';
       messages.forEach(m => renderMessage(m));
       scrollBottom();
     });
 
-    socket.on('message', (msg) => {
-      renderMessage(msg);
-      scrollBottom();
-      // Only alert for OTHER people's live messages (not my own, not history replay)
-      if (msg.username !== myUsername && Date.now() - joinedAt > 1000) {
+    // A private message arrived (could be one I sent, echoed back)
+    socket.on('dm', (msg) => {
+      const partner = msg.from === myUsername ? msg.to : msg.from;
+      const incoming = msg.from !== myUsername;
+
+      if (partner === activeChat) {
+        renderMessage(msg);
+        scrollBottom();
+      } else if (incoming) {
+        // Message for a different conversation → mark unread + alert
+        unread[partner] = (unread[partner] || 0) + 1;
+        renderMembers();
+      }
+
+      if (incoming && Date.now() - joinedAt > 1000) {
         playDing();
-        notifyMessage(msg);
+        notifyMessage({ username: msg.from, text: msg.text, type: msg.type, mediaType: msg.mediaType });
       }
     });
 
-    socket.on('system', ({ text }) => {
-      const el = document.createElement('div');
-      el.className = 'system-msg';
-      el.textContent = text;
-      document.getElementById('messages').appendChild(el);
-      scrollBottom();
-    });
-
     socket.on('members', (members) => {
-      const list = document.getElementById('members-list');
-      list.innerHTML = '';
-      members.forEach(m => {
-        if (m.username === myUsername && !myAvatar) myAvatar = m.avatar;
-        const div = document.createElement('div');
-        div.className = 'member-item' + (m.username === myUsername ? ' active' : '');
-        div.innerHTML = `
-          <div class="avatar" style="background:${m.avatar.color}">
-            ${m.avatar.initials}
-            <div class="online-dot"></div>
-          </div>
-          <div>
-            <div class="member-name">${esc(m.username)}</div>
-            ${m.username === myUsername ? '<div class="member-you">You</div>' : ''}
-          </div>`;
-        list.appendChild(div);
-      });
-      document.getElementById('header-count').textContent = `${members.length} online`;
+      contacts = members.filter(m => m.username !== myUsername);
+      members.forEach(m => { if (m.username === myUsername && !myAvatar) myAvatar = m.avatar; });
+      members.forEach(m => { avatarBook[m.username] = m.avatar; });
+      renderMembers();
       renderMyStatusAvatar();
+      updateHeaderPresence();
     });
 
     socket.on('statuses', (list) => {
@@ -1599,44 +1603,150 @@
     socket.on('incoming-call', onIncomingCall);
     socket.on('call-accepted', onCallAccepted);
     socket.on('call-declined', onCallDeclined);
-    socket.on('call-taken', () => { if (!inCall) hideIncomingCall(); });
     socket.on('webrtc-offer', onRemoteOffer);
     socket.on('webrtc-answer', onRemoteAnswer);
     socket.on('webrtc-ice', onRemoteIce);
     socket.on('call-ended', () => endCallCleanup(true));
 
-    socket.on('typing', ({ username, isTyping }) => {
-      if (isTyping) typingUsers.add(username);
-      else typingUsers.delete(username);
+    // Private typing indicator
+    socket.on('dm-typing', ({ from, isTyping }) => {
       const el = document.getElementById('typing-indicator');
-      el.textContent = typingUsers.size
-        ? [...typingUsers].join(', ') + (typingUsers.size === 1 ? ' is typing…' : ' are typing…')
-        : '';
+      if (from === activeChat && isTyping) {
+        el.textContent = from + ' is typing…';
+      } else {
+        el.textContent = '';
+      }
     });
 
     document.getElementById('join-screen').style.display = 'none';
     document.getElementById('chat-screen').style.display = 'flex';
     document.getElementById('room-display').textContent = room;
-    document.getElementById('header-room').textContent = room;
     document.getElementById('share-room-name').textContent = room;
+    showNoChatPlaceholder(true);
+    // On phones, reveal the contacts list so the user can pick someone
+    if (window.innerWidth <= 640) {
+      document.getElementById('sidebar').classList.add('open');
+    }
 
     setupInputListeners();
   }
 
+  // Format a last-seen timestamp WhatsApp-style
+  function lastSeenText(ts) {
+    if (!ts) return 'last seen recently';
+    const d = new Date(ts);
+    const now = new Date();
+    const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const sameDay = d.toDateString() === now.toDateString();
+    const yest = new Date(now); yest.setDate(now.getDate() - 1);
+    const isYest = d.toDateString() === yest.toDateString();
+    if (sameDay) return `last seen today at ${time}`;
+    if (isYest) return `last seen yesterday at ${time}`;
+    return `last seen ${d.toLocaleDateString()} at ${time}`;
+  }
+
+  function shortSeen(ts) {
+    if (!ts) return 'offline';
+    const mins = Math.floor((Date.now() - ts) / 60000);
+    if (mins < 1) return 'last seen just now';
+    if (mins < 60) return `last seen ${mins}m ago`;
+    const d = new Date(ts);
+    if (d.toDateString() === new Date().toDateString())
+      return 'last seen ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return 'last seen ' + d.toLocaleDateString();
+  }
+
+  // ── CONTACTS / CONVERSATIONS ──
+  function renderMembers() {
+    const list = document.getElementById('members-list');
+    list.innerHTML = '';
+
+    if (!contacts.length) {
+      list.innerHTML = '<div style="padding:16px;color:var(--muted);font-size:0.85rem">No contacts yet. Share your room link so friends can join.</div>';
+      return;
+    }
+
+    // Online contacts first, then offline
+    const sorted = [...contacts].sort((a, b) => (b.online ? 1 : 0) - (a.online ? 1 : 0));
+
+    sorted.forEach(m => {
+      const u = m.username;
+      const div = document.createElement('div');
+      div.className = 'member-item' + (u === activeChat ? ' active' : '');
+      div.onclick = () => openConversation(u);
+      const badge = unread[u] ? `<span style="background:var(--accent);color:#fff;border-radius:11px;min-width:20px;height:20px;display:inline-flex;align-items:center;justify-content:center;font-size:0.72rem;font-weight:700;padding:0 5px">${unread[u]}</span>` : '';
+      const sub = m.online
+        ? '<div class="member-you" style="color:var(--accent)">online</div>'
+        : `<div class="member-you" style="color:var(--muted)">${shortSeen(m.lastSeen)}</div>`;
+      const dot = m.online ? '<div class="online-dot"></div>' : '';
+      const dimmed = m.online ? '' : 'opacity:0.55';
+      div.innerHTML = `
+        <div class="avatar" style="background:${m.avatar.color};${dimmed}">
+          ${m.avatar.initials}
+          ${dot}
+        </div>
+        <div style="flex:1;min-width:0">
+          <div class="member-name">${esc(u)}</div>
+          ${sub}
+        </div>
+        ${badge}`;
+      list.appendChild(div);
+    });
+  }
+
+  function openConversation(username) {
+    activeChat = username;
+    unread[username] = 0;
+
+    // Header shows the contact
+    const av = document.getElementById('header-avatar');
+    const avatar = avatarBook[username] || { color: 'var(--accent)', initials: username.slice(0,2).toUpperCase() };
+    av.style.display = 'flex';
+    av.style.background = avatar.color;
+    av.textContent = avatar.initials;
+    document.getElementById('header-room').textContent = username;
+
+    showNoChatPlaceholder(false);
+    document.getElementById('messages').innerHTML = '';
+    document.getElementById('typing-indicator').textContent = '';
+
+    // Load this conversation's history
+    socket.emit('dm-open', { withUser: username });
+
+    updateHeaderPresence();
+    renderMembers();
+
+    // On mobile, close the contacts drawer to reveal the chat
+    document.getElementById('sidebar').classList.remove('open');
+  }
+
+  function updateHeaderPresence() {
+    if (!activeChat) return;
+    const c = contacts.find(m => m.username === activeChat);
+    const el = document.getElementById('header-count');
+    if (c && c.online) el.textContent = 'online';
+    else if (c) el.textContent = lastSeenText(c.lastSeen);
+    else el.textContent = 'offline';
+  }
+
+  function showNoChatPlaceholder(show) {
+    document.getElementById('no-chat-placeholder').style.display = show ? 'flex' : 'none';
+    document.getElementById('messages').style.display = show ? 'none' : 'flex';
+    document.getElementById('input-area').style.display = show ? 'none' : 'flex';
+    if (show) {
+      document.getElementById('header-avatar').style.display = 'none';
+      document.getElementById('header-room').textContent = 'FreeChat';
+      document.getElementById('header-count').textContent = 'Select a contact to chat';
+    }
+  }
+
   // ── RENDER ──
   function renderMessage(msg) {
-    const isMine = msg.username === myUsername;
+    const sender = msg.from || msg.username; // support both shapes
+    const isMine = sender === myUsername;
     const container = document.getElementById('messages');
     const group = document.createElement('div');
     group.className = `msg-group ${isMine ? 'mine' : 'other'}`;
-
-    if (!isMine) {
-      group.innerHTML = `
-        <div class="msg-meta">
-          <div class="av-sm" style="background:${msg.avatar.color}">${msg.avatar.initials}</div>
-          <span class="uname">${esc(msg.username)}</span>
-        </div>`;
-    }
 
     const bubble = document.createElement('div');
 
@@ -1758,10 +1868,11 @@
     const input = document.getElementById('msg-input');
     const text = input.value.trim();
     if (!text || !socket) return;
-    socket.emit('message', text);
+    if (!activeChat) { alert('Pick a contact to chat with first.'); return; }
+    socket.emit('dm', { to: activeChat, text });
     input.value = '';
     input.style.height = 'auto';
-    socket.emit('typing', false);
+    socket.emit('dm-typing', { to: activeChat, isTyping: false });
     updateSendBtn();
   }
 
@@ -1796,6 +1907,7 @@
 
   async function sendPendingImages() {
     if (!socket || !pendingImages.length) return;
+    if (!activeChat) { alert('Pick a contact to chat with first.'); return; }
     const toSend = [...pendingImages];
     pendingImages = [];
     renderImagePreviews();
@@ -1808,14 +1920,14 @@
         fd.append('file', item.file);
         const res = await fetch('/upload', { method: 'POST', body: fd });
         const data = await res.json();
-        if (data.url) socket.emit('media', { url: data.url, mediaType: 'image' });
+        if (data.url) socket.emit('dm-media', { to: activeChat, url: data.url, mediaType: 'image' });
       } catch(e) { alert('Image upload failed.'); }
       finally { URL.revokeObjectURL(item.objectUrl); hideUploadToast(); }
     }
 
     const input = document.getElementById('msg-input');
     const text = input.value.trim();
-    if (text) { socket.emit('message', text); input.value = ''; input.style.height = 'auto'; }
+    if (text) { socket.emit('dm', { to: activeChat, text }); input.value = ''; input.style.height = 'auto'; }
   }
 
   // ── VOICE RECORDING ──
@@ -1889,7 +2001,7 @@
       fd.append('file', blob, `voice-${Date.now()}.${mimeType.includes('ogg') ? 'ogg' : 'webm'}`);
       const res = await fetch('/upload', { method: 'POST', body: fd });
       const data = await res.json();
-      if (data.url) socket.emit('media', { url: data.url, mediaType: 'voice', duration });
+      if (data.url) socket.emit('dm-media', { to: activeChat, url: data.url, mediaType: 'voice', duration });
     } catch(e) { alert('Failed to send voice message.'); }
     finally { hideUploadToast(); }
   }
@@ -2151,11 +2263,12 @@
     return document.querySelectorAll('#members-list .member-item').length;
   }
 
-  // Start a call (caller side)
+  // Start a call (caller side) — calls the person you're chatting with
   async function startCall(video) {
     if (inCall) return;
-    if (getMembersCount() < 2) {
-      alert('No one else is in the room to call yet.');
+    if (!activeChat) { alert('Open a contact first, then start the call.'); return; }
+    if (!contacts.some(m => m.username === activeChat && m.online)) {
+      alert(activeChat + ' is offline right now.');
       return;
     }
     callIsVideo = video;
@@ -2173,9 +2286,10 @@
 
     inCall = true;
     openCallScreen('Calling…');
+    document.getElementById('ct-name').textContent = activeChat;
+    setCallAvatar(avatarBook[activeChat]);
     showLocalStream();
-    // Ring everyone; first to accept connects
-    socket.emit('call-start', { video });
+    socket.emit('call-start', { to: activeChat, video });
   }
 
   // Incoming call (callee side)
@@ -2437,7 +2551,8 @@
     } catch (e) { /* audio not supported */ }
   }
 
-  // A short two-note "ding" generated on the fly (no audio file needed)
+  // A short, bright two-note "pop" in the style of a messaging notification
+  // (original synthesized tone, not the copyrighted WhatsApp audio file)
   function playDing() {
     if (!soundEnabled) return;
     try {
@@ -2446,18 +2561,20 @@
       if (notifyCtx.state === 'suspended') notifyCtx.resume();
 
       const now = notifyCtx.currentTime;
-      [ [880, 0], [1320, 0.13] ].forEach(([freq, delay]) => {
+      // Two quick rising notes with fast, marimba-like decay
+      const notes = [ { f: 1100, t: 0, dur: 0.16 }, { f: 1480, t: 0.085, dur: 0.20 } ];
+      notes.forEach(n => {
         const osc = notifyCtx.createOscillator();
         const gain = notifyCtx.createGain();
-        osc.type = 'sine';
-        osc.frequency.value = freq;
-        gain.gain.setValueAtTime(0.0001, now + delay);
-        gain.gain.exponentialRampToValueAtTime(0.25, now + delay + 0.02);
-        gain.gain.exponentialRampToValueAtTime(0.0001, now + delay + 0.25);
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(n.f, now + n.t);
+        gain.gain.setValueAtTime(0.0001, now + n.t);
+        gain.gain.exponentialRampToValueAtTime(0.3, now + n.t + 0.012);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + n.t + n.dur);
         osc.connect(gain);
         gain.connect(notifyCtx.destination);
-        osc.start(now + delay);
-        osc.stop(now + delay + 0.3);
+        osc.start(now + n.t);
+        osc.stop(now + n.t + n.dur + 0.02);
       });
     } catch (e) { /* ignore */ }
   }
@@ -2542,10 +2659,10 @@
       input.style.height = 'auto';
       input.style.height = input.scrollHeight + 'px';
       updateSendBtn();
-      if (socket) {
-        socket.emit('typing', true);
+      if (socket && activeChat) {
+        socket.emit('dm-typing', { to: activeChat, isTyping: true });
         clearTimeout(typingTimeout);
-        typingTimeout = setTimeout(() => socket.emit('typing', false), 1500);
+        typingTimeout = setTimeout(() => socket.emit('dm-typing', { to: activeChat, isTyping: false }), 1500);
       }
     });
   }
