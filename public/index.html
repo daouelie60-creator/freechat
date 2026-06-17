@@ -2,11 +2,12 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>FreeChat</title>
   <link rel="manifest" href="/manifest.json" />
-  <meta name="theme-color" content="#00a884" />
+  <meta name="theme-color" content="#202c33" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="FreeChat" />
   <link rel="apple-touch-icon" href="/icon-192.png" />
@@ -968,16 +969,80 @@
     @media (max-width: 640px) {
       #sidebar {
         position: absolute; top: 0; bottom: 0; left: 0;
-        width: 82%; z-index: 50;
+        width: 85%; max-width: 320px; z-index: 50;
         transform: translateX(-100%);
+        padding-top: env(safe-area-inset-top);
       }
       #sidebar.open { transform: translateX(0); box-shadow: 6px 0 24px rgba(0,0,0,0.5); }
-      #messages { padding: 12px 3%; }
-      #typing-indicator { padding: 0 3% 4px; }
+
+      #chat-screen { height: 100dvh; }
+
+      /* Safe-area padding so content clears notch & home indicator */
+      #share-bar { padding-top: max(7px, env(safe-area-inset-top)); }
+      #chat-header {
+        padding-top: 10px;
+        padding-left: max(12px, env(safe-area-inset-left));
+        padding-right: max(12px, env(safe-area-inset-right));
+      }
+      #input-area {
+        padding-bottom: max(8px, env(safe-area-inset-bottom));
+        padding-left: max(8px, env(safe-area-inset-left));
+        padding-right: max(8px, env(safe-area-inset-right));
+      }
+
+      #messages {
+        padding: 10px 10px;
+      }
+      #typing-indicator { padding: 0 12px 4px; }
+
+      .msg-group { max-width: 82%; }
+
+      /* 16px inputs prevent iOS auto-zoom on focus */
+      #msg-input, #composer-text, input { font-size: 16px; }
+      #msg-input { padding: 9px 4px; }
+
+      /* Bubbles a touch larger for readability */
+      .bubble { font-size: 0.95rem; }
+
+      /* Image bubbles fit narrow screens */
+      .bubble.img-bubble img { max-width: 70vw; }
+
+      /* Voice bubble fits */
+      .bubble.voice-bubble { min-width: 180px; max-width: 75vw; }
+
+      /* Header action icons: hide video/search to save space, keep menu */
+      /* Header action icons: hide video/search to save space, keep bell + menu */
+      .header-actions .hdr-btn:nth-child(2),
+      .header-actions .hdr-btn:nth-child(3) { display: none; }
+
+      /* Composer text smaller on phones */
+      #composer-text { font-size: 1.4rem; }
+      .composer-header { padding-top: max(14px, env(safe-area-inset-top)); }
+      .composer-toolbar { padding-bottom: max(24px, env(safe-area-inset-bottom)); }
+
+      /* Status viewer safe areas */
+      .viewer-progress { padding-top: max(10px, env(safe-area-inset-top)); }
+      .viewer-footer { padding-bottom: max(20px, env(safe-area-inset-bottom)); }
+
+      /* Join screen comfortable on small screens */
+      #join-screen { padding: 24px 18px max(24px, env(safe-area-inset-bottom)); }
     }
+
+    /* Very small / short screens */
+    @media (max-width: 380px) {
+      .msg-group { max-width: 86%; }
+      .room-icon { width: 36px; height: 36px; }
+    }
+
     @media (min-width: 641px) {
       #sidebar-toggle { display: none; }
       .msg-group { max-width: 58%; }
+    }
+
+    /* Landscape phones: tighten vertical space */
+    @media (max-height: 450px) and (orientation: landscape) {
+      #share-bar { display: none; }
+      #chat-header { min-height: 48px; padding-top: 6px; padding-bottom: 6px; }
     }
   </style>
 </head>
@@ -1077,6 +1142,19 @@
         <p id="header-count">0 online</p>
       </div>
       <div class="header-actions">
+        <button class="hdr-btn" id="mute-btn" onclick="toggleMute()" title="Sound & notifications" aria-label="Toggle sound and notifications">
+          <svg id="bell-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+            <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+          </svg>
+          <svg id="bell-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none">
+            <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+            <path d="M18.63 13A17.89 17.89 0 0 1 18 8"/>
+            <path d="M6.26 6.26A5.86 5.86 0 0 0 6 8c0 7-3 9-3 9h14"/>
+            <path d="M18 8a6 6 0 0 0-9.33-5"/>
+            <line x1="1" y1="1" x2="23" y2="23"/>
+          </svg>
+        </button>
         <button class="hdr-btn" title="Video call" aria-label="Video call">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
@@ -1246,6 +1324,11 @@
   let typingTimeout;
   let pendingImages = [];
 
+  // Notification + sound state
+  let soundEnabled = true;
+  let notifyCtx = null;     // Web Audio context for the "ding"
+  let joinedAt = 0;         // ignore history replay for sound/notify
+
   // Status state
   let allStatuses = [];          // all active statuses from server
   let statusComposerImg = null;  // {file, objectUrl} when posting image status
@@ -1271,7 +1354,12 @@
 
     myUsername = username;
     myRoom = room;
+    joinedAt = Date.now();
     socket = io();
+
+    // Unlock audio (browsers need a user gesture first) and ask for notifications
+    initSound();
+    requestNotifyPermission();
 
     socket.on('connect', () => socket.emit('join', { username, room }));
 
@@ -1280,7 +1368,15 @@
       scrollBottom();
     });
 
-    socket.on('message', (msg) => { renderMessage(msg); scrollBottom(); });
+    socket.on('message', (msg) => {
+      renderMessage(msg);
+      scrollBottom();
+      // Only alert for OTHER people's live messages (not my own, not history replay)
+      if (msg.username !== myUsername && Date.now() - joinedAt > 1000) {
+        playDing();
+        notifyMessage(msg);
+      }
+    });
 
     socket.on('system', ({ text }) => {
       const el = document.createElement('div');
@@ -1853,6 +1949,90 @@
     clearTimeout(viewerTimer);
     document.getElementById('status-viewer').classList.remove('open');
     document.getElementById('viewer-body').innerHTML = '';
+  }
+
+  // ═══════════════════════════════
+  //  SOUND + NOTIFICATIONS
+  // ═══════════════════════════════
+
+  function initSound() {
+    try {
+      if (!notifyCtx) notifyCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (notifyCtx.state === 'suspended') notifyCtx.resume();
+    } catch (e) { /* audio not supported */ }
+  }
+
+  // A short two-note "ding" generated on the fly (no audio file needed)
+  function playDing() {
+    if (!soundEnabled) return;
+    try {
+      if (!notifyCtx) initSound();
+      if (!notifyCtx) return;
+      if (notifyCtx.state === 'suspended') notifyCtx.resume();
+
+      const now = notifyCtx.currentTime;
+      [ [880, 0], [1320, 0.13] ].forEach(([freq, delay]) => {
+        const osc = notifyCtx.createOscillator();
+        const gain = notifyCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = freq;
+        gain.gain.setValueAtTime(0.0001, now + delay);
+        gain.gain.exponentialRampToValueAtTime(0.25, now + delay + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + delay + 0.25);
+        osc.connect(gain);
+        gain.connect(notifyCtx.destination);
+        osc.start(now + delay);
+        osc.stop(now + delay + 0.3);
+      });
+    } catch (e) { /* ignore */ }
+  }
+
+  function requestNotifyPermission() {
+    if (!('Notification' in window)) return;
+    if (Notification.permission === 'default') {
+      Notification.requestPermission().catch(() => {});
+    }
+  }
+
+  function notifyMessage(msg) {
+    // Only show a popup if the tab/app is not currently in focus
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    if (!document.hidden) return; // user is already looking at the chat
+
+    let body;
+    if (msg.type === 'media' && msg.mediaType === 'image') body = '📷 Photo';
+    else if (msg.type === 'media' && msg.mediaType === 'voice') body = '🎤 Voice message';
+    else body = msg.text || 'New message';
+
+    try {
+      const options = {
+        body,
+        icon: '/icon-192.png',
+        badge: '/icon-192.png',
+        tag: 'freechat-' + myRoom,
+        renotify: true
+      };
+      // Installed PWAs (esp. Android) need the service worker to show notifications
+      if ('serviceWorker' in navigator && navigator.serviceWorker.ready) {
+        navigator.serviceWorker.ready
+          .then(reg => reg.showNotification(msg.username, options))
+          .catch(() => { try { new Notification(msg.username, options); } catch (e) {} });
+      } else {
+        const n = new Notification(msg.username, options);
+        n.onclick = () => { window.focus(); n.close(); };
+      }
+    } catch (e) { /* some mobile browsers can't show notifications without push setup */ }
+  }
+
+  function toggleMute() {
+    soundEnabled = !soundEnabled;
+    document.getElementById('bell-on').style.display = soundEnabled ? '' : 'none';
+    document.getElementById('bell-off').style.display = soundEnabled ? 'none' : '';
+    if (soundEnabled) {
+      initSound();
+      requestNotifyPermission();
+      playDing(); // little confirmation beep
+    }
   }
 
   // ── LIGHTBOX ──
